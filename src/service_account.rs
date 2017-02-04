@@ -44,8 +44,9 @@ fn encode_base64<T: AsRef<[u8]>>(s: T) -> String {
 
 fn decode_rsa_key_rustls(pem: &str) -> Result<PrivateKey, Box<error::Error>> {
     let pem = pem.to_string().replace("\\n", "\n").into_bytes();
-    let mut pemreader: &[u8] = pem.as_ref();
-    let private_keys = pemfile::rsa_private_keys(&mut pemreader);
+    // NOTE: This doesn't work yet, as rustls doesn't have a method to decode
+    // PKCS#8 encoded keys yet (ctz/rustls#43).
+    let private_keys = pemfile::rsa_private_keys(&mut pem.as_ref());
 
     println!("{:?}", &private_keys);
     if let Ok(pk) = private_keys {
