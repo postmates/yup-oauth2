@@ -14,7 +14,7 @@
 use std::borrow::BorrowMut;
 use std::default::Default;
 use std::error;
-use std::io::Read;
+use std::io::{self, Read};
 use std::result;
 use std::str;
 
@@ -24,6 +24,9 @@ use types::{StringError, Token};
 
 use hyper::header;
 use url::form_urlencoded;
+use rustls::{self, PrivateKey};
+use rustls::sign::{self, Signer};
+use rustls::internal::pemfile;
 
 use base64;
 use chrono;
@@ -37,6 +40,24 @@ const GOOGLE_RS256_HEAD: &'static str = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
 // Encodes s as Base64
 fn encode_base64<T: AsRef<[u8]>>(s: T) -> String {
     base64::encode_mode(s.as_ref(), base64::Base64Mode::UrlSafe)
+}
+
+fn decode_rsa_key_rustls(pem: &str) -> Result<PrivateKey, Box<error::Error>> {
+    let pem = pem.to_string().replace("\\n", "\n").into_bytes();
+    let mut pemreader: &[u8] = pem.as_ref();
+    let private_keys = pemfile::rsa_private_keys(&mut pemreader);
+
+    println!("{:?}", &private_keys);
+    if let Ok(pk) = private_keys {
+        if pk.len() > 0 {
+            Ok(pk[0].clone())
+        } else {
+            Err(Box::new(io::Error::new(io::ErrorKind::InvalidInput,
+                                        "Not enough private keys in PEM")))
+        }
+    } else {
+        Err(Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Error reading key from PEM")))
+    }
 }
 
 fn decode_rsa_key(pem_pkcs8: &str) -> Result<openssl::rsa::Rsa, Box<error::Error>> {
@@ -107,15 +128,31 @@ impl JWT {
         let key = try!(decode_rsa_key(private_key));
         let pkey = try!(openssl::pkey::PKey::from_rsa(key));
 
-        let mut signer =
-            try!(openssl::sign::Signer::new(
-                 openssl::hash::MessageDigest::sha256(), &pkey));
+        let mut signer = try!(openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(),
+                                                         &pkey));
         signer.update(&jwt_head.as_bytes()).unwrap();
         let signature = signer.finish().unwrap();
         let signature_b64 = encode_base64(signature);
 
         jwt_head.push_str(".");
         jwt_head.push_str(&signature_b64);
+
+        Ok(jwt_head)
+    }
+
+    fn sign_rustls(&self, private_key_pem: &str) -> Result<String, Box<error::Error>> {
+        let mut jwt_head = self.encode_claims();
+
+        let key = try!(decode_rsa_key_rustls(private_key_pem));
+        let signer = try!(sign::RSASigner::new(&key)
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Couldn't initialize signer")));
+        let signature = try!(signer.sign(rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                                         jwt_head.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Couldn't sign claims")));
+        let signature = encode_base64(signature);
+
+        jwt_head.push_str(".");
+        jwt_head.push_str(&signature);
 
         Ok(jwt_head)
     }
@@ -268,11 +305,12 @@ mod tests {
     const TEST_PRIVATE_KEY_PATH: &'static str = "examples/Sanguine-69411a0c0eea.json";
 
     // Uncomment this test to verify that we can successfully obtain tokens.
-    //#[test]
+    // #[test]
     #[allow(dead_code)]
     fn test_service_account_e2e() {
         let key = service_account_key_from_file(&TEST_PRIVATE_KEY_PATH.to_string()).unwrap();
-        let client = hyper::Client::with_connector(HttpsConnector::new(hyper_rustls::TlsClient::new()));
+        let client =
+            hyper::Client::with_connector(HttpsConnector::new(hyper_rustls::TlsClient::new()));
         let mut acc = ServiceAccountAccess::new(key, client);
         println!("{:?}",
                  acc.token(vec![&"https://www.googleapis.com/auth/pubsub"]).unwrap());
@@ -301,8 +339,11 @@ mod tests {
         let claims = super::init_claims_from_key(&key, &scopes);
         let jwt = super::JWT::new(claims);
         let signature = jwt.sign(key.private_key.as_ref().unwrap());
+        let signature_rustls = jwt.sign_rustls(key.private_key.as_ref().unwrap());
 
         assert!(signature.is_ok());
+
+        println!("{:?}", (&signature, signature_rustls));
 
         let signature = signature.unwrap();
         assert_eq!(signature.split(".").nth(0).unwrap(),

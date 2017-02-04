@@ -67,7 +67,6 @@
 //!
 #[macro_use]
 extern crate serde_derive;
-
 extern crate serde;
 extern crate serde_json;
 
@@ -76,6 +75,7 @@ extern crate chrono;
 extern crate openssl;
 extern crate hyper;
 extern crate hyper_rustls;
+extern crate rustls;
 
 #[cfg(test)]
 extern crate log;
